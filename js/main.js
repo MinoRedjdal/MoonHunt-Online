@@ -2,16 +2,17 @@
 const gameState = {
     currentScreen: 'homeScreen',
     playerName: '',
-    selectedEmoji: '',
+    selectedEmoji: '👤',
     roomCode: '',
     isHost: false,
-    players: [],
+    players: {},
     gameSettings: {
         playerCount: 8,
         werewolfCount: 2,
         includeProtector: true,
         includeDetective: true
-    }
+    },
+    ws: null
 };
 
 // DOM Elements
@@ -68,10 +69,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Create Room
     document.getElementById('createGameBtn').addEventListener('click', () => {
-        gameState.isHost = true;
         gameState.roomCode = generateRoomCode();
         updateGameSettings();
         showScreen('lobbyScreen');
+        connectToRoom();
         updateLobbyDisplay();
     });
 
@@ -81,6 +82,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (code.length === 8) {
             gameState.roomCode = code;
             showScreen('lobbyScreen');
+            connectToRoom();
             updateLobbyDisplay();
         } else {
             alert('Please enter a valid 8-character room code');
@@ -101,12 +103,47 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Leave Room
     document.querySelector('.leave-btn').addEventListener('click', () => {
+        disconnectFromRoom();
         gameState.isHost = false;
         gameState.roomCode = '';
-        gameState.players = [];
+        gameState.players = {};
         showScreen('roomOptionsScreen');
     });
 });
+
+// WebSocket Functions
+function connectToRoom() {
+    const wsUrl = `ws://localhost:8000/ws/${gameState.roomCode}/${gameState.playerName}?player_emoji=${gameState.selectedEmoji}`;
+    gameState.ws = new WebSocket(wsUrl);
+
+    gameState.ws.onopen = () => {
+        console.log('Connected to game server');
+    };
+
+    gameState.ws.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+        gameState.players = data.players;
+        gameState.isHost = data.host === gameState.playerName;
+        updateLobbyDisplay();
+    };
+
+    gameState.ws.onclose = () => {
+        console.log('Disconnected from game server');
+        // Optionally handle reconnection
+    };
+
+    gameState.ws.onerror = (error) => {
+        console.error('WebSocket error:', error);
+        alert('Failed to connect to game server. Please try again.');
+    };
+}
+
+function disconnectFromRoom() {
+    if (gameState.ws) {
+        gameState.ws.close();
+        gameState.ws = null;
+    }
+}
 
 // Utility Functions
 function generateRoomCode() {
@@ -129,20 +166,13 @@ function updateLobbyDisplay() {
     document.getElementById('roomCodeDisplay').textContent = gameState.roomCode;
     document.getElementById('hostControls').style.display = gameState.isHost ? 'block' : 'none';
     
-    // Add current player to the list if not already present
-    if (!gameState.players.find(p => p.name === gameState.playerName)) {
-        gameState.players.push({
-            name: gameState.playerName,
-            emoji: gameState.selectedEmoji
-        });
-    }
-
     // Update player list
     const playersList = document.getElementById('playersList');
     playersList.innerHTML = '';
-    gameState.players.forEach(player => {
+    
+    Object.values(gameState.players).forEach(player => {
         const li = document.createElement('li');
-        li.textContent = `${player.emoji} ${player.name}${player.name === gameState.playerName ? ' (You)' : ''}`;
+        li.textContent = `${player.emoji} ${player.name}${player.name === gameState.playerName ? ' (You)' : ''}${player.name === Object.values(gameState.players)[0].name ? ' (Host)' : ''}`;
         playersList.appendChild(li);
     });
 }

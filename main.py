@@ -1,71 +1,97 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from typing import Dict, List, Optional
+from fastapi.staticfiles import StaticFiles
 import json
-import random
-import string
-from pydantic import BaseModel
+from typing import Dict, Set, Optional
+import os
 
 app = FastAPI()
 
 # Enable CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, replace with specific origins
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+# Serve static files
+static_path = os.path.dirname(os.path.abspath(__file__))
+app.mount("/", StaticFiles(directory=static_path, html=True), name="static")
+
 # Game state storage
-class GameRoom:
-    def __init__(self, host_id: str, settings: dict):
-        self.code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
-        self.host_id = host_id
-        self.players: Dict[str, WebSocket] = {}
-        self.player_info: Dict[str, dict] = {}
-        self.settings = settings
-        self.state = "lobby"  # lobby, night, day
-        self.roles: Dict[str, str] = {}
-
-class GameManager:
+class ConnectionManager:
     def __init__(self):
-        self.rooms: Dict[str, GameRoom] = {}
+        self.rooms: Dict[str, Dict[str, WebSocket]] = {}  # room_code -> {player_name: websocket}
+        self.player_info: Dict[str, Dict[str, dict]] = {}  # room_code -> {player_name: player_info}
+        self.room_hosts: Dict[str, str] = {}  # room_code -> host_name
 
-game_manager = GameManager()
+    async def connect(self, websocket: WebSocket, room_code: str, player_name: str, player_info: dict):
+        await websocket.accept()
+        
+        if room_code not in self.rooms:
+            self.rooms[room_code] = {}
+            self.player_info[room_code] = {}
+            self.room_hosts[room_code] = player_name  # First player is the host
+        
+        self.rooms[room_code][player_name] = websocket
+        self.player_info[room_code][player_name] = player_info
+        
+        # Notify all players in the room about the new player
+        await self.broadcast_room_state(room_code)
 
-# Models
-class Player(BaseModel):
-    name: str
-    emoji: str
+    def disconnect(self, room_code: str, player_name: str):
+        if room_code in self.rooms and player_name in self.rooms[room_code]:
+            del self.rooms[room_code][player_name]
+            del self.player_info[room_code][player_name]
+            
+            # If room is empty, clean it up
+            if not self.rooms[room_code]:
+                del self.rooms[room_code]
+                del self.player_info[room_code]
+                del self.room_hosts[room_code]
+            # If host left, assign new host
+            elif player_name == self.room_hosts[room_code] and self.rooms[room_code]:
+                self.room_hosts[room_code] = next(iter(self.rooms[room_code].keys()))
 
-class RoomSettings(BaseModel):
-    max_players: int
-    num_werewolves: int
-    include_protector: bool
-    include_detective: bool
+    async def broadcast_room_state(self, room_code: str):
+        if room_code in self.rooms:
+            room_state = {
+                "players": self.player_info[room_code],
+                "host": self.room_hosts[room_code]
+            }
+            for connection in self.rooms[room_code].values():
+                await connection.send_text(json.dumps(room_state))
 
-@app.get("/")
-async def read_root():
-    return {"message": "Welcome to MoonHunt Online!"}
+manager = ConnectionManager()
 
-@app.post("/create-room")
-async def create_room(settings: RoomSettings):
-    # Implementation coming soon
-    pass
-
-@app.websocket("/ws/{room_code}/{player_id}")
-async def websocket_endpoint(websocket: WebSocket, room_code: str, player_id: str):
-    await websocket.accept()
+@app.websocket("/ws/{room_code}/{player_name}")
+async def websocket_endpoint(
+    websocket: WebSocket, 
+    room_code: str, 
+    player_name: str,
+    player_emoji: Optional[str] = "👤"
+):
+    player_info = {
+        "name": player_name,
+        "emoji": player_emoji
+    }
+    
+    await manager.connect(websocket, room_code, player_name, player_info)
     
     try:
         while True:
             data = await websocket.receive_text()
-            # Handle game logic here
-            await websocket.send_text(f"Message received: {data}")
+            # Handle game actions here in the future
+            
     except WebSocketDisconnect:
-        # Handle disconnection
-        pass
+        manager.disconnect(room_code, player_name)
+        await manager.broadcast_room_state(room_code)
+
+@app.get("/")
+async def read_root():
+    return {"message": "Welcome to MoonHunt Online!"}
 
 if __name__ == "__main__":
     import uvicorn
